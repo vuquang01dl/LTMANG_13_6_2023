@@ -1,0 +1,188 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <dirent.h>
+
+#define PORT 8000
+#define BUFFER_SIZE 1024
+
+void handle_client(int client_socket);
+
+int main()
+{
+    int server_socket, client_socket;
+    struct sockaddr_in server_address, client_address;
+    socklen_t client_address_len;
+
+    // Tạo socket
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == -1)
+    {
+        perror("Error creating socket");
+        exit(EXIT_FAILURE);
+    }
+
+    // Thiết lập địa chỉ server
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(PORT);
+    server_address.sin_addr.s_addr = INADDR_ANY;
+
+    // Liên kết địa chỉ server với socket
+    if (bind(server_socket, (struct sockaddr *)&server_address, sizeof(server_address)) == -1)
+    {
+        perror("Error binding");
+        exit(EXIT_FAILURE);
+    }
+
+    // Lắng nghe kết nối đến
+    if (listen(server_socket, 1) == -1)
+    {
+        perror("Error listening");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Server is listening on port %d\n", PORT);
+
+    while (1)
+    {
+        // Chấp nhận kết nối từ client
+        client_address_len = sizeof(client_address);
+        client_socket = accept(server_socket, (struct sockaddr *)&client_address, &client_address_len);
+        if (client_socket == -1)
+        {
+            perror("Error accepting connection");
+            exit(EXIT_FAILURE);
+        }
+
+        printf("New client connected: %s:%d\n", inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port));
+
+        // Sử dụng process con để xử lý kết nối client
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            close(server_socket); // Đóng server socket trong process con
+
+            handle_client(client_socket);
+
+            close(client_socket);
+            exit(EXIT_SUCCESS);
+        }
+        else if (pid > 0)
+        {
+            close(client_socket); // Đóng client socket trong process cha
+        }
+        else
+        {
+            perror("Error forking process");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    close(server_socket);
+
+    return 0;
+}
+
+void handle_client(int client_socket)
+{
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_received, bytes_sent;
+    int file_count = 0;
+    DIR *dir;
+    struct dirent *entry;
+
+    // Mở thư mục và đếm số file trong thư mục
+    dir = opendir("path/to/directory"); // Đường dẫn đến thư mục chứa các file
+    if (dir == NULL)
+    {
+        strcpy(buffer, "ERROR No files to download \r\n");
+        send(client_socket, buffer, strlen(buffer), 0);
+        close(client_socket);
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (entry->d_type == DT_REG)
+        {
+            file_count++;
+        }
+    }
+    closedir(dir);
+
+    if (file_count > 0)
+    {
+        // Gửi danh sách các file cho client
+        sprintf(buffer, "OK %d\r\n", file_count);
+        send(client_socket, buffer, strlen(buffer), 0);
+
+        dir = opendir("path/to/directory");
+        while ((entry = readdir(dir)) != NULL)
+        {
+            if (entry->d_type == DT_REG)
+            {
+                send(client_socket, entry->d_name, strlen(entry->d_name), 0);
+                send(client_socket, "\r\n", 2, 0);
+            }
+        }
+        closedir(dir);
+
+        send(client_socket, "\r\n", 2, 0);
+    }
+    else
+    {
+        strcpy(buffer, "ERROR No files to download \r\n");
+        send(client_socket, buffer, strlen(buffer), 0);
+        close(client_socket);
+        return;
+    }
+
+    // Nhận tên file từ client
+    bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+    if (bytes_received == -1)
+    {
+        perror("Error receiving data");
+        close(client_socket);
+        return;
+    }
+    buffer[bytes_received] = '\0';
+
+    // Kiểm tra sự tồn tại của file và gửi nội dung file cho client
+    FILE *file;
+    char file_path[256];
+    snprintf(file_path, sizeof(file_path), "path/to/directory/%s", buffer);
+
+    file = fopen(file_path, "rb");
+    if (file == NULL)
+    {
+        strcpy(buffer, "ERROR File not found. Please try again.\r\n");
+        send(client_socket, buffer, strlen(buffer), 0);
+        close(client_socket);
+        return;
+    }
+    else
+    {
+        fseek(file, 0, SEEK_END);
+        long file_size = ftell(file);
+        rewind(file);
+
+        sprintf(buffer, "OK %ld\r\n", file_size);
+        send(client_socket, buffer, strlen(buffer), 0);
+
+        while ((bytes_sent = fread(buffer, sizeof(char), sizeof(buffer), file)) > 0)
+        {
+            if (send(client_socket, buffer, bytes_sent, 0) == -1)
+            {
+                perror("Error sending file");
+                break;
+            }
+        }
+
+        fclose(file);
+    }
+
+    close(client_socket);
+}
